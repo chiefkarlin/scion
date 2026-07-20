@@ -1,11 +1,3 @@
----
-name: agent-status-signals
-description: >-
-  Status signaling protocol for all Scion agents. Covers the three mandatory signals
-  (ask_user, blocked, task_completed) that keep the orchestration system informed of
-  agent state. Every agent template should reference this skill.
----
-
 # Agent Status Signals
 
 You must explicitly signal your state to the orchestration system using `sciontool status`. These signals prevent false stall detection, enable notification routing, and keep users and other agents informed.

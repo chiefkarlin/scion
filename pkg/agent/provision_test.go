@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
 // seedTestHarnessConfig creates a minimal harness-config directory for testing.
@@ -2295,16 +2297,16 @@ func TestInjectPlatformSkills(t *testing.T) {
 		}
 	})
 
-	t.Run("skill with scripts subdirectory is fully copied", func(t *testing.T) {
+	t.Run("skill with nested subdirectory is fully copied", func(t *testing.T) {
 		agentHome := t.TempDir()
 		skillsDir := ".claude/commands"
 
 		skillsFS := fstest.MapFS{
-			"scion/SKILL.md": &fstest.MapFile{
-				Data: []byte("---\nname: scion\n---\n\n# Scion\n"),
+			"scion-agent-manage/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: scion-agent-manage\n---\n\n# Scion Agent Manage\n"),
 			},
-			"scion/scripts/start-agent.sh": &fstest.MapFile{
-				Data: []byte("#!/bin/bash\necho start"),
+			"scion-agent-manage/docs/reference.md": &fstest.MapFile{
+				Data: []byte("# Reference\nAgent management reference docs."),
 			},
 		}
 
@@ -2313,13 +2315,13 @@ func TestInjectPlatformSkills(t *testing.T) {
 			t.Fatalf("injectPlatformSkills failed: %v", err)
 		}
 
-		dest := filepath.Join(agentHome, skillsDir, "scion", "scripts", "start-agent.sh")
+		dest := filepath.Join(agentHome, skillsDir, "scion-agent-manage", "docs", "reference.md")
 		data, err := os.ReadFile(dest)
 		if err != nil {
-			t.Fatalf("expected script to be copied, got error: %v", err)
+			t.Fatalf("expected nested file to be copied, got error: %v", err)
 		}
-		if !strings.Contains(string(data), "echo start") {
-			t.Errorf("script content mismatch: %q", string(data))
+		if !strings.Contains(string(data), "reference docs") {
+			t.Errorf("nested file content mismatch: %q", string(data))
 		}
 	})
 
@@ -2346,6 +2348,356 @@ func TestInjectPlatformSkills(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(agentHome, skillsDir, "git-only")); !os.IsNotExist(err) {
 			t.Errorf("expected git-only skill to be skipped when isGit=false")
+		}
+	})
+}
+
+func TestLoadMandatoryPreamble(t *testing.T) {
+	t.Run("nil FS returns nil without panic", func(t *testing.T) {
+		result, err := loadMandatoryPreamble(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil for nil FS, got %q", string(result))
+		}
+	})
+
+	t.Run("empty FS returns nil", func(t *testing.T) {
+		fsys := fstest.MapFS{}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil for empty FS, got %q", string(result))
+		}
+	})
+
+	t.Run("CRLF-terminated file has trailing CR stripped", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"crlf.md": &fstest.MapFile{
+				Data: []byte("# Hello\r\nWorld\r\n"),
+			},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// TrimRight with "\r\n" cutset removes trailing CR and LF characters.
+		if string(result) != "# Hello\r\nWorld" {
+			t.Errorf("expected trailing CRLF stripped, got %q", string(result))
+		}
+	})
+
+	t.Run("single non-empty .md file returns its content", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"preamble.md": &fstest.MapFile{
+				Data: []byte("# Hello\nWorld\n"),
+			},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// TrimRight removes trailing newlines; content should match sans trailing newline
+		if string(result) != "# Hello\nWorld" {
+			t.Errorf("expected '# Hello\\nWorld', got %q", string(result))
+		}
+	})
+
+	t.Run("multiple .md files concatenated in lexical order", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"b-second.md": &fstest.MapFile{Data: []byte("Second\n")},
+			"a-first.md":  &fstest.MapFile{Data: []byte("First\n")},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		expected := "First\n\nSecond"
+		if string(result) != expected {
+			t.Errorf("expected %q, got %q", expected, string(result))
+		}
+	})
+
+	t.Run("whitespace-only .md file is skipped", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"empty.md": &fstest.MapFile{Data: []byte("   \n   \n")},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil for whitespace-only file, got %q", string(result))
+		}
+	})
+
+	t.Run("non-.md file is ignored", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"readme.txt": &fstest.MapFile{Data: []byte("This is a text file\n")},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil when only non-.md files present, got %q", string(result))
+		}
+	})
+
+	t.Run("mix of .md and non-.md files — only .md returned", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"preamble.md": &fstest.MapFile{Data: []byte("# Preamble\n")},
+			"config.yaml": &fstest.MapFile{Data: []byte("key: value\n")},
+			"readme.txt":  &fstest.MapFile{Data: []byte("some text\n")},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(result) != "# Preamble" {
+			t.Errorf("expected only .md content, got %q", string(result))
+		}
+	})
+}
+
+func TestComposeInstructions(t *testing.T) {
+	t.Run("both preamble and template content present", func(t *testing.T) {
+		preamble := []byte("# Preamble")
+		content := []byte("# Template")
+		result := composeInstructions(preamble, content)
+		expected := "# Preamble\n\n# Template"
+		if string(result) != expected {
+			t.Errorf("expected %q, got %q", expected, string(result))
+		}
+	})
+
+	t.Run("preamble present, template content nil", func(t *testing.T) {
+		preamble := []byte("# Preamble")
+		result := composeInstructions(preamble, nil)
+		if string(result) != "# Preamble" {
+			t.Errorf("expected preamble only, got %q", string(result))
+		}
+	})
+
+	t.Run("preamble present, template content empty bytes", func(t *testing.T) {
+		preamble := []byte("# Preamble")
+		result := composeInstructions(preamble, []byte{})
+		if string(result) != "# Preamble" {
+			t.Errorf("expected preamble only for empty template, got %q", string(result))
+		}
+	})
+
+	t.Run("preamble present, template content whitespace-only", func(t *testing.T) {
+		preamble := []byte("# Preamble")
+		result := composeInstructions(preamble, []byte("   \n"))
+		if string(result) != "# Preamble" {
+			t.Errorf("expected preamble only for whitespace template, got %q", string(result))
+		}
+	})
+
+	t.Run("preamble nil, template content present", func(t *testing.T) {
+		content := []byte("# Template")
+		result := composeInstructions(nil, content)
+		if string(result) != "# Template" {
+			t.Errorf("expected template only, got %q", string(result))
+		}
+	})
+
+	t.Run("both nil", func(t *testing.T) {
+		result := composeInstructions(nil, nil)
+		if result != nil {
+			t.Errorf("expected nil for both nil, got %q", string(result))
+		}
+	})
+
+	t.Run("preamble is prepended not appended", func(t *testing.T) {
+		preamble := []byte("PREAMBLE")
+		content := []byte("CONTENT")
+		result := composeInstructions(preamble, content)
+		if !bytes.HasPrefix(result, preamble) {
+			t.Errorf("expected result to start with preamble, got %q", string(result))
+		}
+		if !bytes.HasSuffix(result, content) {
+			t.Errorf("expected result to end with content, got %q", string(result))
+		}
+	})
+}
+
+func TestProvisionAgent_MandatoryPreamble(t *testing.T) {
+	// Load the actual preamble so tests reflect real binary state.
+	realPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	if err != nil {
+		t.Fatalf("failed to load real mandatory preamble: %v", err)
+	}
+
+	// setupGenericEnv creates a minimal environment using the Generic harness,
+	// which writes agent instructions to agents.md in agentHome — easy to verify.
+	setupGenericEnv := func(t *testing.T) (tmpDir, projectScionDir string) {
+		t.Helper()
+		mockRuntimeForTest(t)
+		tmpDir = t.TempDir()
+
+		oldWd, _ := os.Getwd()
+		t.Cleanup(func() { _ = os.Chdir(oldWd) })
+		_ = os.Chdir(tmpDir)
+
+		originalHome := os.Getenv("HOME")
+		t.Cleanup(func() { _ = os.Setenv("HOME", originalHome) })
+		_ = os.Setenv("HOME", tmpDir)
+
+		// Seed a generic harness-config (Generic harness writes to agents.md).
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
+
+		projectDir := filepath.Join(tmpDir, "project")
+		projectScionDir = filepath.Join(projectDir, ".scion")
+		_ = os.MkdirAll(projectScionDir, 0755)
+		_ = os.Chdir(projectDir)
+		return tmpDir, projectScionDir
+	}
+
+	t.Run("default template agent receives mandatory preamble at start of instructions", func(t *testing.T) {
+		if realPreamble == nil {
+			t.Skip("mandatory preamble is empty — skipping injection check")
+		}
+		tmpDir, projectScionDir := setupGenericEnv(t)
+
+		// Create a minimal template that explicitly uses the generic harness.
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		tplDir := filepath.Join(globalScionDir, "templates", "preamble-default-tpl")
+		_ = os.MkdirAll(tplDir, 0755)
+		_ = os.WriteFile(filepath.Join(tplDir, "agents.md"), []byte("# Default Instructions\n"), 0644)
+		tplConfig := `{"default_harness_config": "generic"}`
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+		agentHome, _, _, err := ProvisionAgent(context.Background(), "preamble-default-agent", "preamble-default-tpl", "", "", projectScionDir, "", "", "", "")
+		if err != nil {
+			t.Fatalf("ProvisionAgent failed: %v", err)
+		}
+
+		// Generic harness writes instructions to agents.md in agentHome.
+		instrFile := filepath.Join(agentHome, "agents.md")
+		content, err := os.ReadFile(instrFile)
+		if err != nil {
+			t.Fatalf("failed to read instructions file: %v", err)
+		}
+		if !bytes.HasPrefix(content, realPreamble) {
+			t.Errorf("expected instructions to start with mandatory preamble\npreamble: %q\ngot start: %q",
+				string(realPreamble), string(content[:min(len(content), len(realPreamble)+20)]))
+		}
+	})
+
+	t.Run("custom template with agents.md receives preamble prepended to template content", func(t *testing.T) {
+		if realPreamble == nil {
+			t.Skip("mandatory preamble is empty — skipping injection check")
+		}
+		tmpDir, projectScionDir := setupGenericEnv(t)
+
+		// Create a custom template with its own agents.md.
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		tplDir := filepath.Join(globalScionDir, "templates", "custom-tpl")
+		_ = os.MkdirAll(tplDir, 0755)
+		customContent := "# Custom Agent Instructions\nDo custom things.\n"
+		_ = os.WriteFile(filepath.Join(tplDir, "agents.md"), []byte(customContent), 0644)
+		tplConfig := `{"default_harness_config": "generic"}`
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+		agentHome, _, _, err := ProvisionAgent(context.Background(), "preamble-custom-agent", "custom-tpl", "", "", projectScionDir, "", "", "", "")
+		if err != nil {
+			t.Fatalf("ProvisionAgent failed: %v", err)
+		}
+
+		// Generic harness writes instructions to agents.md in agentHome.
+		instrFile := filepath.Join(agentHome, "agents.md")
+		content, err := os.ReadFile(instrFile)
+		if err != nil {
+			t.Fatalf("failed to read instructions file: %v", err)
+		}
+
+		// Preamble must come first.
+		if !bytes.HasPrefix(content, realPreamble) {
+			t.Errorf("expected instructions to start with mandatory preamble\npreamble: %q\ngot start: %q",
+				string(realPreamble), string(content[:min(len(content), len(realPreamble)+20)]))
+		}
+		// Template content must also appear.
+		if !bytes.Contains(content, []byte("# Custom Agent Instructions")) {
+			t.Errorf("expected custom template content in instructions, got %q", string(content))
+		}
+	})
+
+	t.Run("agent provisioned without agents.md still receives preamble", func(t *testing.T) {
+		if realPreamble == nil {
+			t.Skip("mandatory preamble is empty — skipping injection check")
+		}
+		tmpDir, projectScionDir := setupGenericEnv(t)
+
+		// Create a template with NO agents.md and no agent_instructions in config.
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		tplDir := filepath.Join(globalScionDir, "templates", "no-instructions-tpl")
+		_ = os.MkdirAll(tplDir, 0755)
+		// Minimal config: specifies the generic harness-config, no agent_instructions.
+		tplConfig := `{"default_harness_config": "generic"}`
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+		agentHome, _, _, err := ProvisionAgent(context.Background(), "preamble-no-instructions-agent", "no-instructions-tpl", "", "", projectScionDir, "", "", "", "")
+		if err != nil {
+			t.Fatalf("ProvisionAgent failed: %v", err)
+		}
+
+		// Generic harness writes instructions to agents.md in agentHome.
+		instrFile := filepath.Join(agentHome, "agents.md")
+		content, err := os.ReadFile(instrFile)
+		if err != nil {
+			t.Fatalf("failed to read instructions file: %v", err)
+		}
+		if !bytes.HasPrefix(content, realPreamble) {
+			t.Errorf("expected instructions to start with mandatory preamble even without template agents.md\npreamble: %q\ngot: %q",
+				string(realPreamble), string(content))
+		}
+	})
+
+	t.Run("inline config agent receives preamble prepended to inline instructions", func(t *testing.T) {
+		if realPreamble == nil {
+			t.Skip("mandatory preamble is empty — skipping injection check")
+		}
+		_, projectScionDir := setupGenericEnv(t)
+
+		inlineInstructions := "# Inline Instructions\nDo inline things.\n"
+		inlineCfg := &api.ScionConfig{
+			AgentInstructions: inlineInstructions,
+		}
+
+		// Use templateName="default" with no default template seeded on disk so
+		// GetTemplateChainInProject returns an empty chain without error, which
+		// triggers the else-if inlineCfg path in ProvisionAgent.
+		// Pass "generic" as harnessConfig so the seeded harness-config is used.
+		agentHome, _, _, err := ProvisionAgent(
+			context.Background(),
+			"preamble-inline-agent",
+			"default", // no default template on disk → empty chain → inline path
+			"", "generic", projectScionDir,
+			"", "", "", "",
+			inlineCfg,
+		)
+		if err != nil {
+			t.Fatalf("ProvisionAgent failed: %v", err)
+		}
+
+		// Generic harness writes instructions to agents.md in agentHome.
+		instrFile := filepath.Join(agentHome, "agents.md")
+		content, err := os.ReadFile(instrFile)
+		if err != nil {
+			t.Fatalf("failed to read instructions file: %v", err)
+		}
+		if !bytes.HasPrefix(content, realPreamble) {
+			t.Errorf("expected inline-config instructions to start with mandatory preamble\npreamble: %q\ngot start: %q",
+				string(realPreamble), string(content[:min(len(content), len(realPreamble)+20)]))
+		}
+		if !bytes.Contains(content, []byte("# Inline Instructions")) {
+			t.Errorf("expected inline content in instructions, got %q", string(content))
 		}
 	})
 }
