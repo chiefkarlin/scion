@@ -326,6 +326,9 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 				secretTarget = absPath
 			}
 		}
+	} else {
+		// All values must be base64-encoded before sending to the Hub API
+		value = base64.StdEncoding.EncodeToString([]byte(value))
 	}
 
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
