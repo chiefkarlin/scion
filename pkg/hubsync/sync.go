@@ -238,7 +238,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// In hub context, settings loading may not pick up the env var (e.g. if the
 	// project path resolves to a synthetic or tmpfs directory without a settings file
 	// and koanf doesn't populate the pointer struct). Fall back to the env var.
-	if endpoint == "" && hubContext {
+	if endpoint == "" {
 		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
 		if endpoint == "" {
 			endpoint = os.Getenv("SCION_HUB_URL")
