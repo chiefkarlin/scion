@@ -76,6 +76,6 @@ downloads/
 # PR review artifacts
 pr-*-review*.md
 
-# Python bytecode (harness provisioner unit tests)
+# Python cache (harness provisioner unit tests)
 __pycache__/
 *.pyc
