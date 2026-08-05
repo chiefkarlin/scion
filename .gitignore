@@ -75,3 +75,7 @@ downloads/
 
 # PR review artifacts
 pr-*-review*.md
+
+# Python cache
+__pycache__/
+*.pyc
